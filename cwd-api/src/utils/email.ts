@@ -1,5 +1,6 @@
 import { Bindings } from '../bindings';
 import { createTransport } from 'nodemailer';
+import xss, { whiteList as defaultWhiteList } from 'xss';
 
 export function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -110,8 +111,59 @@ const DEFAULT_ADMIN_TEMPLATE = `<div style="background-color:#f4f4f5;padding:24p
     </div>
   `;
 
+/** Escape text before inserting it into HTML text or quoted attributes. */
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      default: return '&#39;';
+    }
+  });
+}
+
+/** Only allow absolute HTTP(S) article links in notification templates. */
+function safeArticleUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Keep comment formatting while removing unsafe HTML from historical content. */
+function sanitizeCommentHtml(value: string): string {
+  return xss(value, {
+    whiteList: {
+      ...defaultWhiteList,
+      code: ['class'],
+      span: ['class', 'style'],
+      pre: ['class'],
+      div: ['class', 'style'],
+      img: ['src', 'alt', 'title', 'width', 'height', 'style', 'class']
+    },
+    onTagAttr(tag, name, attribute) {
+      if (tag === 'img' && name === 'class') {
+        return attribute.split(/\s+/).includes('tk-owo-emotion') ? 'class="tk-owo-emotion"' : '';
+      }
+    }
+  });
+}
+
+/** Render text and URL variables safely; only comment body slots accept HTML. */
 function replaceTemplate(template: string, variables: Record<string, string>) {
-  return template.replace(/\$\{(\w+)\}/g, (_, key) => variables[key] || '');
+  return template.replace(/\$\{(\w+)\}/g, (_, key: string) => {
+    const value = variables[key];
+    if (typeof value !== 'string') return '';
+    if (key === 'postUrl') return escapeHtml(safeArticleUrl(value));
+    if (key === 'parentComment' || key === 'replyContent' || key === 'commentContent') {
+      return sanitizeCommentHtml(value);
+    }
+    return escapeHtml(value);
+  });
 }
 
 async function dispatchMail(
